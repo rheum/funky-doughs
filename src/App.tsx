@@ -68,6 +68,14 @@ function App() {
     kpis.forEach(([label, value], index) => { const x = 18 + index * 58; doc.setFillColor('#f7f1e9'); doc.roundedRect(x, 43, 52, 23, 2, 2, 'F'); doc.setTextColor(muted); doc.setFontSize(7); doc.text(label.toUpperCase(), x + 4, 50); doc.setTextColor(ink); doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.text(value, x + 4, 60); doc.setFont('helvetica', 'normal') })
     autoTable(doc, { startY: 76, margin: { left: 18, right: 18 }, head: [['Zutat', 'Typ / Details', 'Bäcker-%', 'Gramm']], body: sortedIngredients(recipe.ingredients).map((item) => [item.name, detail(item), `${item.percentage} %`, `${calculations.ingredientGrams[item.id] ?? 0} g`]), theme: 'grid', styles: { font: 'helvetica', fontSize: 9, textColor: ink, cellPadding: 3 }, headStyles: { fillColor: '#29251f', textColor: '#ffffff', fontStyle: 'bold' }, alternateRowStyles: { fillColor: '#fbf8f3' }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' } } })
     const finalY = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || 76
+    const punchMarkYs = [108.5, 188.5]
+    doc.setDrawColor('#b8afa3')
+    doc.setLineWidth(0.35)
+    for (let page = 1; page <= doc.getNumberOfPages(); page += 1) {
+      doc.setPage(page)
+      punchMarkYs.forEach((y) => doc.line(4, y, 11, y))
+    }
+    doc.setPage(doc.getNumberOfPages())
     doc.setTextColor(muted); doc.setFontSize(8); doc.text('Erstellt mit Funky Doughs', 18, Math.min(finalY + 14, 285))
     const filename = `${slug || 'funky-doughs-rezept'}.pdf`
     if (/Android/i.test(navigator.userAgent)) {
