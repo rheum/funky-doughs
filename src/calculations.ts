@@ -9,37 +9,99 @@ export type RecipeCalculations = {
 }
 
 const round = (value: number) => Math.round(value * 10) / 10
-const ingredientFactor = (item: Ingredient) => item.kind === 'sourdough' ? (item.sourdoughTa || 200) / 100 : 1
+const ingredientFactor = (item: Ingredient) => item.kind === 'sourdough' ? Math.max(100, item.sourdoughTa || 200) / 100 : 1
+const containsFlour = (item: Ingredient) => item.kind === 'flour' || item.kind === 'sourdough'
+const precise = (value: number) => Math.round(value * 1e9) / 1e9
+
+export function totalFlourPercentage(recipe: Recipe) {
+  return recipe.ingredients.filter(containsFlour).reduce((sum, item) => sum + item.percentage / ingredientFactor(item), 0)
+}
+
+export function migrateSourdoughPercentages(recipe: Recipe): Recipe {
+  if (recipe.sourdoughPercentageBasis === 'total') return recipe
+  return {
+    ...recipe,
+    sourdoughPercentageBasis: 'total',
+    ingredients: recipe.ingredients.map((item) => item.kind === 'sourdough'
+      ? { ...item, percentage: precise(item.percentage * ingredientFactor(item)) } : item),
+  }
+}
+
+export function updateIngredientPercentage(recipe: Recipe, id: string, percentage: number): Recipe {
+  const edited = recipe.ingredients.find((item) => item.id === id)
+  if (!edited || !Number.isFinite(percentage)) return recipe
+  if (!containsFlour(edited)) {
+    return { ...recipe, ingredients: recipe.ingredients.map((item) => item.id === id ? { ...item, percentage } : item) }
+  }
+
+  const others = recipe.ingredients.filter((item) => item.id !== id && containsFlour(item))
+  // Redistribute flour shares; convert back to whole-starter percentages using each TA.
+  const editedShare = others.length ? Math.max(0, Math.min(100, percentage / ingredientFactor(edited))) : 100
+  const shares = new Map(others.map((item) => [item.id, Math.max(0, item.percentage / ingredientFactor(item))]))
+  let remaining = 100 - editedShare - [...shares.values()].reduce((sum, value) => sum + value, 0)
+  while (Math.abs(remaining) > 1e-9) {
+    const eligible = others.filter((item) => remaining > 0 || shares.get(item.id)! > 1e-9)
+    if (!eligible.length) break
+    const adjustment = remaining / eligible.length
+    for (const item of eligible) {
+      const current = shares.get(item.id)!
+      const change = Math.max(-current, adjustment)
+      shares.set(item.id, current + change)
+      remaining -= change
+    }
+  }
+  return {
+    ...recipe,
+    ingredients: recipe.ingredients.map((item) => item.id === id
+      ? { ...item, percentage: precise(editedShare * ingredientFactor(item)) }
+      : shares.has(item.id) ? { ...item, percentage: precise(shares.get(item.id)! * ingredientFactor(item)) } : item),
+  }
+}
+
+export function updateSourdoughTa(recipe: Recipe, id: string, ta: number, fixedGrams?: Record<string, number>): Recipe {
+  const edited = recipe.ingredients.find((item) => item.id === id)
+  if (edited?.kind !== 'sourdough' || !Number.isFinite(ta)) return recipe
+  const updated = {
+    ...recipe,
+    ingredients: recipe.ingredients.map((item) => item.id === id ? { ...item, sourdoughTa: Math.max(100, ta) } : item),
+  }
+  return fixedGrams
+    ? percentagesFromIngredientGrams(updated, fixedGrams)
+    : updateIngredientPercentage(updated, id, edited.percentage)
+}
+
+export function removeRecipeIngredient(recipe: Recipe, id: string, fixedGrams?: Record<string, number>): Recipe {
+  const removed = recipe.ingredients.find((item) => item.id === id)
+  if (!removed) return recipe
+  const remaining = { ...recipe, ingredients: recipe.ingredients.filter((item) => item.id !== id) }
+  if (fixedGrams) return percentagesFromIngredientGrams(remaining, fixedGrams)
+  const redistributed = containsFlour(removed) ? updateIngredientPercentage(recipe, id, 0) : recipe
+  return { ...redistributed, ingredients: redistributed.ingredients.filter((item) => item.id !== id) }
+}
 
 export function calculateRecipe(recipe: Recipe, doughWeight: number): RecipeCalculations {
-  const flourPercentage = recipe.ingredients
-    .filter((item) => item.kind === 'flour' || item.kind === 'sourdough')
-    .reduce((sum, item) => sum + item.percentage, 0)
+  const flourPercentage = totalFlourPercentage(recipe)
   const sourdoughFlour = recipe.ingredients
     .filter((item) => item.kind === 'sourdough')
-    .reduce((sum, item) => sum + item.percentage, 0)
+    .reduce((sum, item) => sum + item.percentage / ingredientFactor(item), 0)
   const sourdoughWater = recipe.ingredients
     .filter((item) => item.kind === 'sourdough')
-    .reduce((sum, item) => sum + item.percentage * (((item.sourdoughTa || 200) / 100) - 1), 0)
+    .reduce((sum, item) => sum + item.percentage * (1 - 1 / ingredientFactor(item)), 0)
   const liquidWater = recipe.ingredients
     .filter((item) => item.kind === 'liquid' || item.kind === 'other')
     .reduce((sum, item) => sum + item.percentage * ((item.waterContent || 0) / 100), 0)
   const totalWater = sourdoughWater + liquidWater
-  const nonFlourPercentage = recipe.ingredients
-    .filter((item) => item.kind !== 'flour' && item.kind !== 'sourdough')
-    .reduce((sum, item) => sum + item.percentage, 0) + recipe.ingredients
-    .filter((item) => item.kind === 'sourdough')
-    .reduce((sum, item) => sum + item.percentage * ((item.sourdoughTa || 200) / 100), 0)
-  const gramsPerPercent = doughWeight / (flourPercentage + nonFlourPercentage || 100)
+  const totalPercentage = recipe.ingredients.reduce((sum, item) => sum + item.percentage, 0)
+  const gramsPerPercent = doughWeight / (totalPercentage || 100)
   const ingredientGrams: Record<string, number> = {}
 
   for (const item of recipe.ingredients) {
-    ingredientGrams[item.id] = round(item.percentage * ingredientFactor(item) * gramsPerPercent)
+    ingredientGrams[item.id] = round(item.percentage * gramsPerPercent)
   }
 
   const totalFlourGrams = recipe.ingredients.reduce((sum, item) => {
     if (item.kind === 'flour') return sum + ingredientGrams[item.id]
-    if (item.kind === 'sourdough') return sum + ingredientGrams[item.id] / ((item.sourdoughTa || 200) / 100)
+    if (item.kind === 'sourdough') return sum + ingredientGrams[item.id] / ingredientFactor(item)
     return sum
   }, 0)
   const hydration = flourPercentage ? totalWater / flourPercentage * 100 : 0
@@ -84,10 +146,10 @@ export function percentageForIngredientGrams(recipe: Recipe, doughWeight: number
   const targetGrams = Math.max(0, Math.min(grams, doughWeight))
   const otherCoefficient = recipe.ingredients
     .filter((candidate) => candidate.id !== id)
-    .reduce((sum, candidate) => sum + candidate.percentage * ingredientFactor(candidate), 0)
+    .reduce((sum, candidate) => sum + candidate.percentage, 0)
   if (otherCoefficient <= 0 || targetGrams >= doughWeight) return item.percentage
   const flourBase = (doughWeight - targetGrams) / otherCoefficient
-  return round(targetGrams / (flourBase * ingredientFactor(item)))
+  return round(targetGrams / flourBase)
 }
 
 export function percentagesFromIngredientGrams(recipe: Recipe, gramsById: Record<string, number>) {
@@ -102,7 +164,7 @@ export function percentagesFromIngredientGrams(recipe: Recipe, gramsById: Record
     ...recipe,
     ingredients: recipe.ingredients.map((item) => ({
       ...item,
-      percentage: round(((gramsById[item.id] || 0) / ingredientFactor(item)) / flourGrams * 100),
+      percentage: round((gramsById[item.id] || 0) / flourGrams * 100),
     })),
   }
 }

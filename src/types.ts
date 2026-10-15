@@ -27,6 +27,7 @@ export type Recipe = {
   title: string
   ingredients: Ingredient[]
   preparation?: PreparationStep[]
+  sourdoughPercentageBasis?: 'total'
   updatedAt: string
 }
 
@@ -36,7 +37,7 @@ export const grains: Grain[] = ['Roggen', 'Weizen', 'Dinkel']
 export const uid = () => crypto.randomUUID()
 
 export const blankRecipe = (): Recipe => ({
-  id: uid(), title: 'Mein neues Brot', updatedAt: new Date().toISOString(), preparation: [], ingredients: [
+  id: uid(), title: 'Mein neues Brot', sourdoughPercentageBasis: 'total', updatedAt: new Date().toISOString(), preparation: [], ingredients: [
     { id: uid(), kind: 'flour', name: 'Weizen 550', percentage: 100, grain: 'Weizen', type: '550' },
     { id: uid(), kind: 'liquid', name: 'Wasser', percentage: 68, liquidKind: 'water', waterContent: 100 },
     { id: uid(), kind: 'salt', name: 'Salz', percentage: 2, waterContent: 0 },

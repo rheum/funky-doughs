@@ -1,4 +1,5 @@
 import type { Recipe } from './types'
+import { migrateSourdoughPercentages } from './calculations'
 
 const DB_NAME = 'teigwerk'
 const STORE = 'recipes'
@@ -14,7 +15,7 @@ export const loadRecipes = async (): Promise<Recipe[]> => {
   const db = await openDb()
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
-    request.onsuccess = () => resolve(request.result as Recipe[])
+    request.onsuccess = () => resolve((request.result as Recipe[]).map(migrateSourdoughPercentages))
     request.onerror = () => reject(request.error)
   })
 }
