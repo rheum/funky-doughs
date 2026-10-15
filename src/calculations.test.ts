@@ -1,101 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { calculateRecipe, calculateRecipeFromIngredientGrams, convertYeastPercentage, percentageForIngredientGrams, percentagesFromIngredientGrams, updateIngredientPercentage, totalFlourPercentage, migrateSourdoughPercentages, removeRecipeIngredient, updateSourdoughTa } from './calculations'
+import { calculateRecipe, calculateRecipeFromIngredientGrams, convertYeastPercentage, percentageForIngredientGrams, percentagesFromIngredientGrams, updateIngredientPercentage, totalFlourPercentage, migrateSourdoughPercentages, removeRecipeIngredient, updateSourdoughTa, setIngredientLocked, canRemoveRecipeIngredient } from './calculations'
 import type { Recipe } from './types'
 
 const recipe = (ingredients: Recipe['ingredients']): Recipe => ({ id: 'test', title: 'Test', ingredients, updatedAt: '' })
 const flour = (percentage: number) => ({ id: 'flour', kind: 'flour' as const, name: 'Weizen 550', percentage })
 const water = (percentage: number) => ({ id: 'water', kind: 'liquid' as const, name: 'Wasser', percentage, liquidKind: 'water' as const, waterContent: 100 })
-
-describe('Sauerteig-TA ändern', () => {
-  const input = () => recipe([
-    flour(60),
-    { id: 'starter', kind: 'sourdough', name: 'Sauerteig', percentage: 40, sourdoughTa: 200 },
-    { id: 'other-starter', kind: 'sourdough', name: 'Zweiter Sauerteig', percentage: 36, sourdoughTa: 180 },
-    water(60),
-  ])
-
-  it.each([
-    [100, 50, 18],
-    [400, 65, 45],
-  ])('verteilt nach Änderung auf TA %s die Mehlanteile neu', (ta, flourShare, otherStarterShare) => {
-    const original = input()
-    const updated = updateSourdoughTa(original, 'starter', ta)
-    expect(updated.ingredients.map((item) => item.percentage)).toEqual([flourShare, 40, otherStarterShare, 60])
-    expect(updated.ingredients[1].sourdoughTa).toBe(ta)
-    expect(totalFlourPercentage(updated)).toBeCloseTo(100)
-    const result = calculateRecipe(updated, 1000)
-    expect(Object.values(result.ingredientGrams).reduce((sum, grams) => sum + grams, 0)).toBeCloseTo(1000, 0)
-    expect(original.ingredients[1].sourdoughTa).toBe(200)
-  })
-
-  it('berechnet im Modus feste Mengen die Prozente und KPIs aus unveränderten Grammwerten', () => {
-    const original = recipe([flour(80), input().ingredients[1], water(60)])
-    const grams = { flour: 800, starter: 400, water: 600 }
-    const updated = updateSourdoughTa(original, 'starter', 100, grams)
-    expect(updated.ingredients.map((item) => item.percentage)).toEqual([66.7, 33.3, 50])
-    const result = calculateRecipeFromIngredientGrams(updated, grams)
-    expect(result.ingredientGrams).toEqual(grams)
-    expect(result.totalFlourGrams).toBe(1200)
-    expect(result.hydration).toBe(50)
-  })
-
-  it('begrenzt die TA auf mindestens 100 und ignoriert ungültige Ziele', () => {
-    expect(updateSourdoughTa(input(), 'starter', 50).ingredients[1].sourdoughTa).toBe(100)
-    const original = input()
-    expect(updateSourdoughTa(original, 'flour', 200)).toEqual(original)
-    expect(updateSourdoughTa(original, 'missing', 200)).toEqual(original)
-    expect(updateSourdoughTa(original, 'starter', NaN)).toEqual(original)
-  })
-})
-
-describe('Zutaten entfernen', () => {
-  const input = () => recipe([
-    flour(60),
-    { ...flour(20), id: 'rye' },
-    { id: 'starter', kind: 'sourdough', name: 'Sauerteig', percentage: 36, sourdoughTa: 180 },
-    water(60),
-  ])
-
-  it('verteilt das entfernte Mehl gleichmäßig unter Berücksichtigung der Sauerteig-TA', () => {
-    const original = input()
-    const updated = removeRecipeIngredient(original, 'flour')
-    expect(updated.ingredients.map((item) => item.percentage)).toEqual([50, 90, 60])
-    expect(totalFlourPercentage(updated)).toBe(100)
-    expect(original.ingredients[0].percentage).toBe(60)
-  })
-
-  it('verteilt nur den Mehlanteil eines entfernten Sauerteigs', () => {
-    const updated = removeRecipeIngredient(input(), 'starter')
-    expect(updated.ingredients.map((item) => item.percentage)).toEqual([70, 30, 60])
-    expect(totalFlourPercentage(updated)).toBe(100)
-  })
-
-  it('lässt andere Zutaten und entfernte Nullanteile ohne Umverteilung', () => {
-    const original = input()
-    expect(removeRecipeIngredient(original, 'water').ingredients).toEqual(original.ingredients.slice(0, 3))
-    const withZero = { ...original, ingredients: [...original.ingredients, { ...flour(0), id: 'new' }] }
-    expect(removeRecipeIngredient(withZero, 'new')).toEqual(original)
-    expect(removeRecipeIngredient(original, 'missing')).toEqual(original)
-  })
-
-  it('setzt den letzten verbleibenden Sauerteig auf 100 Prozent Mehl', () => {
-    const original = input()
-    const updated = removeRecipeIngredient(removeRecipeIngredient(original, 'flour'), 'rye')
-    expect(updated.ingredients[0].percentage).toBe(180)
-    expect(totalFlourPercentage(updated)).toBe(100)
-    expect(removeRecipeIngredient(updated, 'starter').ingredients).toEqual([water(60)])
-  })
-
-  it('berechnet beim Entfernen mit festen Mengen nur die Prozente und KPIs neu', () => {
-    const original = input()
-    const grams = { flour: 600, rye: 200, starter: 360, water: 600 }
-    const updated = removeRecipeIngredient(original, 'flour', grams)
-    expect(updated.ingredients.map((item) => item.percentage)).toEqual([50, 90, 150])
-    const result = calculateRecipeFromIngredientGrams(updated, grams)
-    expect(result.ingredientGrams).toEqual({ rye: 200, starter: 360, water: 600 })
-    expect(result.totalFlourGrams).toBe(400)
-  })
-})
 
 describe('Rezeptberechnungen', () => {
   it('berechnet die Versäuerung als Mehlanteil des Gesamtmehls', () => {
@@ -176,91 +85,6 @@ describe('Rezeptberechnungen', () => {
   })
 })
 
-describe('Mehlanteile verteilen', () => {
-  const mixed = () => recipe([
-    flour(60),
-    { ...flour(20), id: 'rye' },
-    { id: 'starter', kind: 'sourdough', name: 'Sauerteig', percentage: 40, sourdoughTa: 200 },
-    water(60),
-    { id: 'salt', kind: 'salt', name: 'Salz', percentage: 2 },
-  ])
-  const shares = (input: Recipe) => input.ingredients.filter((item) => item.kind === 'flour' || item.kind === 'sourdough').map((item) => item.percentage)
-
-  it('verteilt frei werdendes Mehl gleichmäßig auf andere Mehle und Sauerteige', () => {
-    const input = mixed()
-    const result = updateIngredientPercentage(input, 'flour', 40)
-    expect(shares(result)).toEqual([40, 30, 60])
-    expect(result.ingredients.slice(3)).toEqual(input.ingredients.slice(3))
-    expect(shares(input)).toEqual([60, 20, 40])
-  })
-
-  it('zieht bei einer Erhöhung gleiche Anteile von den anderen Mehlen ab', () => {
-    expect(shares(updateIngredientPercentage(mixed(), 'flour', 80))).toEqual([80, 10, 20])
-  })
-
-  it('verteilt weiter, wenn ein kleiner Mehlanteil bei null ankommt', () => {
-    const input = mixed()
-    input.ingredients[0].percentage = 50
-    input.ingredients[1].percentage = 5
-    input.ingredients[2].percentage = 90
-    expect(shares(updateIngredientPercentage(input, 'flour', 80))).toEqual([80, 0, 40])
-  })
-
-  it('hält auch bei Rundungsresten die Summe auf 100 Prozent', () => {
-    const input = mixed()
-    input.ingredients.splice(3, 0, { ...flour(0), id: 'spelt' })
-    const result = shares(updateIngredientPercentage(input, 'flour', 59))
-    expect(result[0]).toBe(59)
-    expect(totalFlourPercentage(updateIngredientPercentage(input, 'flour', 59))).toBeCloseTo(100, 5)
-    const increments = result.slice(1).map((value, index) => value / [1, 2, 1][index] - [20, 20, 0][index])
-    expect(Math.max(...increments) - Math.min(...increments)).toBeLessThanOrEqual(0.1)
-  })
-
-  it('begrenzt Eingaben und hält ein einzelnes Mehl bei 100 Prozent', () => {
-    expect(shares(updateIngredientPercentage(mixed(), 'flour', 120))).toEqual([100, 0, 0])
-    expect(shares(updateIngredientPercentage(mixed(), 'flour', -10))).toEqual([0, 50, 100])
-    expect(shares(updateIngredientPercentage(recipe([flour(100), water(60)]), 'flour', 50))).toEqual([100])
-  })
-
-  it('ändert Wasserprozente ohne Umverteilung der Mehle', () => {
-    const result = updateIngredientPercentage(mixed(), 'water', 70)
-    expect(shares(result)).toEqual([60, 20, 40])
-    expect(result.ingredients[3].percentage).toBe(70)
-  })
-
-  it.each([150, 180, 200, 250])('berücksichtigt TA %s bei Sauerteigmenge und Rückrechnung', (ta) => {
-    const input = mixed()
-    input.ingredients[2].sourdoughTa = ta
-    input.ingredients[2].percentage = 20 * ta / 100
-    const updated = updateIngredientPercentage(input, 'flour', 40)
-    const calculated = calculateRecipe(updated, 1000)
-    const flourGrams = calculated.ingredientGrams.flour + calculated.ingredientGrams.rye + calculated.ingredientGrams.starter / (ta / 100)
-    expect(calculated.sourdough).toBe(30)
-    expect(calculated.ingredientGrams.starter / (ta / 100) / flourGrams * 100).toBeCloseTo(30, 1)
-    expect(Object.values(calculated.ingredientGrams).reduce((sum, value) => sum + value, 0)).toBeCloseTo(1000, 0)
-    expect(shares(percentagesFromIngredientGrams(updated, calculated.ingredientGrams))).toEqual([40, 30, 30 * ta / 100])
-    expect(shares(updateIngredientPercentage(updated, 'starter', 20 * ta / 100))).toEqual([45, 35, 20 * ta / 100])
-  })
-
-  it('verteilt gleiche Mehlanteile auf mehrere Sauerteige mit unterschiedlicher TA', () => {
-    const input = recipe([
-      flour(60),
-      { id: 'firm', kind: 'sourdough', name: 'Fester Sauerteig', percentage: 30, sourdoughTa: 150 },
-      { id: 'liquid', kind: 'sourdough', name: 'Flüssiger Sauerteig', percentage: 50, sourdoughTa: 250 },
-      water(40),
-    ])
-    const updated = updateIngredientPercentage(input, 'flour', 40)
-    const result = calculateRecipe(updated, 1000)
-    expect(shares(updated)).toEqual([40, 45, 75])
-    expect(result.ingredientGrams.firm).toBe(225)
-    expect(result.ingredientGrams.liquid).toBe(375)
-    expect(result.hydration).toBe(100)
-    expect(result.sourdough).toBe(60)
-    expect(Object.values(result.ingredientGrams).reduce((sum, grams) => sum + grams, 0)).toBeCloseTo(1000, 0)
-  })
-})
-
-
 describe('Sauerteigprozente als gesamte Sauerteigmenge', () => {
   const input = recipe([
     flour(90),
@@ -288,7 +112,7 @@ describe('Sauerteigprozente als gesamte Sauerteigmenge', () => {
     expect(percentageForIngredientGrams(input, 1700, 'starter', 200)).toBe(20)
   })
 
-  it('erlaubt mehr als 100 % Sauerteig, solange dessen Mehlanteil passt', () => {
+  it('erlaubt Sauerteiganteile über 100 Prozent mit passendem Mehlausgleich', () => {
     const updated = updateIngredientPercentage(input, 'starter', 150)
     expect(updated.ingredients.map((item) => item.percentage)).toEqual([25, 150, 60])
     expect(totalFlourPercentage(updated)).toBe(100)
@@ -304,5 +128,107 @@ describe('Sauerteigprozente als gesamte Sauerteigmenge', () => {
     const calculated = calculateRecipe(migrated, 800 + 2 * ta)
     expect(calculated.ingredientGrams.flour).toBe(800)
     expect(calculated.ingredientGrams.starter).toBe(2 * ta)
+  })
+})
+
+
+describe('Fixierte Zutaten und automatischer Ausgleich', () => {
+  const input = () => recipe([
+    flour(60),
+    { ...flour(20), id: 'rye' },
+    { id: 'starter', kind: 'sourdough', name: 'Sauerteig', percentage: 36, sourdoughTa: 180 },
+    water(60),
+  ])
+
+  it('verteilt nur auf freie Mehlzutaten', () => {
+    const original = setIngredientLocked(input(), 'rye', true)
+    const updated = updateIngredientPercentage(original, 'flour', 40)
+    expect(updated.ingredients.map(i => i.percentage)).toEqual([40, 20, 72, 60])
+    expect(totalFlourPercentage(updated)).toBeCloseTo(100)
+    expect(original.ingredients[2].percentage).toBe(36)
+  })
+
+  it('verteilt ohne Fixierungen gleichmäßig nach Mehlanteil', () => {
+    expect(updateIngredientPercentage(input(), 'flour', 40).ingredients.map(i => i.percentage)).toEqual([40, 30, 54, 60])
+  })
+
+  it('verhindert das Fixieren der letzten freien Mehlzutat', () => {
+    const locked = setIngredientLocked(setIngredientLocked(input(), 'flour', true), 'rye', true)
+    expect(setIngredientLocked(locked, 'starter', true)).toEqual(locked)
+    expect(setIngredientLocked(locked, 'water', true).ingredients[3].locked).toBe(true)
+    expect(setIngredientLocked(locked, 'flour', false).ingredients[0].locked).toBe(false)
+  })
+
+  it('lässt fixierte Eingaben und TA unverändert', () => {
+    const locked = setIngredientLocked(input(), 'starter', true)
+    expect(updateIngredientPercentage(locked, 'starter', 80)).toEqual(locked)
+    expect(updateSourdoughTa(locked, 'starter', 250)).toEqual(locked)
+    expect(removeRecipeIngredient(locked, 'starter')).toEqual(locked)
+  })
+
+  it('setzt den einzigen freien Mehlanteil auf den verbleibenden Rest', () => {
+    const locked = setIngredientLocked(setIngredientLocked(input(), 'flour', true), 'rye', true)
+    const updated = updateIngredientPercentage(locked, 'starter', 80)
+    expect(updated.ingredients.map(i => i.percentage)).toEqual([60, 20, 36, 60])
+    expect(totalFlourPercentage(updated)).toBeCloseTo(100)
+  })
+
+  it('begrenzt Erhöhungen auf den Anteil, der nach Fixierungen noch verfügbar ist', () => {
+    const locked = setIngredientLocked(input(), 'starter', true)
+    const updated = updateIngredientPercentage(locked, 'flour', 95)
+    expect(updated.ingredients.map(i => i.percentage)).toEqual([80, 0, 36, 60])
+  })
+
+  it('verteilt nach Erreichen von null weiter, ohne fixierte Anteile zu ändern', () => {
+    const original = input()
+    original.ingredients[0].percentage = 50
+    original.ingredients[1].percentage = 5
+    original.ingredients[2].percentage = 81
+    expect(updateIngredientPercentage(original, 'flour', 80).ingredients.map(i => i.percentage)).toEqual([80, 0, 36, 60])
+  })
+
+  it.each([150, 180, 200, 250])('berücksichtigt TA %s bei freien Sauerteigen', (ta) => {
+    const original = input()
+    original.ingredients[2].sourdoughTa = ta
+    original.ingredients[2].percentage = ta / 5
+    const updated = updateIngredientPercentage(setIngredientLocked(original, 'rye', true), 'flour', 40)
+    expect(updated.ingredients[2].percentage).toBe(ta * 0.4)
+    expect(totalFlourPercentage(updated)).toBeCloseTo(100)
+  })
+
+  it('gleicht TA-Änderungen nur über freie Zutaten aus', () => {
+    const updated = updateSourdoughTa(setIngredientLocked(input(), 'rye', true), 'starter', 360)
+    expect(updated.ingredients.map(i => i.percentage)).toEqual([70, 20, 36, 60])
+    expect(totalFlourPercentage(updated)).toBeCloseTo(100)
+  })
+
+  it('verteilt beim Entfernen nur auf freie Zutaten', () => {
+    const updated = removeRecipeIngredient(setIngredientLocked(input(), 'rye', true), 'flour')
+    expect(updated.ingredients.map(i => i.percentage)).toEqual([20, 144, 60])
+  })
+
+  it('verhindert das Entfernen der letzten freien Mehlzutat', () => {
+    const locked = setIngredientLocked(setIngredientLocked(input(), 'flour', true), 'rye', true)
+    expect(canRemoveRecipeIngredient(locked, 'starter')).toBe(false)
+    expect(removeRecipeIngredient(locked, 'starter')).toEqual(locked)
+    expect(canRemoveRecipeIngredient(input(), 'flour')).toBe(true)
+    expect(canRemoveRecipeIngredient(recipe([flour(100)]), 'flour')).toBe(false)
+  })
+
+  it('erhält fixe Grammwerte bei Änderungen anderer Mengen', () => {
+    const locked = setIngredientLocked(input(), 'starter', true)
+    const result = percentagesFromIngredientGrams(locked, { flour: 500, rye: 200, starter: 360, water: 600 })
+    expect(result.ingredients[2].locked).toBe(true)
+    expect(calculateRecipeFromIngredientGrams(result, { flour: 500, rye: 200, starter: 360, water: 600 }).ingredientGrams.starter).toBe(360)
+  })
+
+  it('stellt beim Laden vollständig fixierter Rezepte eine freie Mehlzutat sicher', () => {
+    const original = input()
+    original.sourdoughPercentageBasis = 'total'
+    original.ingredients = original.ingredients.map(i => ({ ...i, locked: true }))
+    const loaded = migrateSourdoughPercentages(original)
+    expect(loaded.ingredients[0].locked).toBe(false)
+    expect(loaded.ingredients.slice(1).every(i => i.locked)).toBe(true)
+    expect(migrateSourdoughPercentages(loaded)).toEqual(loaded)
   })
 })

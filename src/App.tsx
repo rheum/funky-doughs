@@ -4,7 +4,7 @@ import { createRecipePdf } from './pdf'
 import { blankRecipe, flourTypes, grains, uid } from './types'
 import type { Grain, Ingredient, IngredientKind, LiquidKind, PreparationStep, Recipe, YeastKind } from './types'
 import { deleteRecipe, loadRecipes, saveRecipe } from './db'
-import { calculateRecipe, calculateRecipeFromIngredientGrams, convertYeastPercentage, percentageForIngredientGrams, percentagesFromIngredientGrams, updateIngredientPercentage, totalFlourPercentage, migrateSourdoughPercentages, removeRecipeIngredient, updateSourdoughTa } from './calculations'
+import { calculateRecipe, calculateRecipeFromIngredientGrams, convertYeastPercentage, percentageForIngredientGrams, percentagesFromIngredientGrams, updateIngredientPercentage, totalFlourPercentage, migrateSourdoughPercentages, removeRecipeIngredient, updateSourdoughTa, setIngredientLocked, canRemoveRecipeIngredient, rebalanceFreeFlour } from './calculations'
 import { canReorderPreparationStep, canReorderPreparationStepToEnd, reorderPreparationStep } from './preparation'
 
 const round = (n: number) => Math.round(n * 10) / 10
@@ -20,6 +20,7 @@ function App() {
   const [doughWeight, setDoughWeight] = useState(1000)
   const [calculationMode, setCalculationMode] = useState<'dough' | 'ingredients'>('dough')
   const [fixedIngredientGrams, setFixedIngredientGrams] = useState<Record<string, number> | null>(null)
+  const [editingIngredientOrder, setEditingIngredientOrder] = useState<string[] | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => { loadRecipes().then((saved) => { setRecipes(saved); if (saved[0]) setRecipe(saved[0]); setReady(true) }) }, [])
@@ -91,16 +92,30 @@ function App() {
     updateRecipe((current) => ({ ...current, ingredients: [...current.ingredients, base] }))
   }
   const updateIngredient = (id: string, patch: Partial<Ingredient>) => updateRecipe((current) => {
-    const updated = { ...current, ingredients: current.ingredients.map((item) => item.id === id ? { ...item, ...patch } : item) }
+    const original = current.ingredients.find((item) => item.id === id)
+    if (!original || original.locked) return current
+    const hasFlour = (item: Ingredient) => item.kind === 'flour' || item.kind === 'sourdough'
+    if (patch.kind && !hasFlour({ ...original, kind: patch.kind }) && hasFlour(original)
+      && !current.ingredients.some((item) => item.id !== id && hasFlour(item) && !item.locked)) return current
+    let updated = { ...current, ingredients: current.ingredients.map((item) => item.id === id ? { ...item, ...patch } : item) }
+    const fixedGrams = calculationMode === 'ingredients'
+      ? Object.fromEntries(current.ingredients.map((item) => [item.id, fixedIngredientGrams?.[item.id] ?? calculations.ingredientGrams[item.id] ?? 0]))
+      : undefined
     if (patch.sourdoughTa !== undefined) {
-      const fixedGrams = calculationMode === 'ingredients'
-        ? Object.fromEntries(current.ingredients.map((item) => [item.id, fixedIngredientGrams?.[item.id] ?? calculations.ingredientGrams[item.id] ?? 0]))
-        : undefined
-      return updateSourdoughTa(updated, id, patch.sourdoughTa, fixedGrams)
+      updated = updateSourdoughTa(updated, id, patch.sourdoughTa, fixedGrams)
+    } else if (patch.percentage !== undefined) {
+      updated = updateIngredientPercentage(updated, id, patch.percentage)
+    } else if (patch.kind !== undefined) {
+      updated = fixedGrams ? percentagesFromIngredientGrams(updated, fixedGrams) : rebalanceFreeFlour(updated)
     }
-    return patch.percentage === undefined ? updated : updateIngredientPercentage(updated, id, patch.percentage)
+    return updated
+  })
+  const toggleIngredientLock = (id: string) => updateRecipe((current) => {
+    const item = current.ingredients.find((candidate) => candidate.id === id)
+    return item ? setIngredientLocked(current, id, !item.locked) : current
   })
   const updateIngredientGrams = (id: string, grams: number) => {
+    if (recipe.ingredients.find((item) => item.id === id)?.locked) return
     if (calculationMode === 'dough') {
       updateRecipe((current) => ({ ...current, ingredients: current.ingredients.map((item) => item.id === id ? { ...item, percentage: percentageForIngredientGrams(current, doughWeight, id, grams) } : item) }))
       return
@@ -121,6 +136,7 @@ function App() {
     setCalculationMode(mode)
   }
   const removeIngredient = (id: string) => {
+    if (!canRemoveRecipeIngredient(recipe, id)) return
     if (calculationMode === 'ingredients') {
       const remainingGrams = Object.fromEntries(recipe.ingredients
         .filter((item) => item.id !== id)
@@ -137,6 +153,12 @@ function App() {
     ? calculateRecipeFromIngredientGrams(recipe, fixedIngredientGrams)
     : calculateRecipe(recipe, doughWeight), [recipe, doughWeight, calculationMode, fixedIngredientGrams])
   const flourPercentageSum = round(totalFlourPercentage(recipe))
+  const freeFlourIds = recipe.ingredients.filter((item) => (item.kind === 'flour' || item.kind === 'sourdough') && !item.locked).map((item) => item.id)
+  const displayedIngredients = sortedIngredients(recipe.ingredients)
+  if (editingIngredientOrder) {
+    const positions = new Map(editingIngredientOrder.map((id, index) => [id, index]))
+    displayedIngredients.sort((a, b) => (positions.get(a.id) ?? positions.size) - (positions.get(b.id) ?? positions.size))
+  }
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -151,12 +173,17 @@ function App() {
       <section className="editor-header"><label className="title-field"><span>Rezepttitel <em>bearbeiten</em></span><input className="title-input" value={recipe.title} onChange={(event) => updateTitle(event.target.value)} aria-label="Rezepttitel" /></label><div className="recipe-meta"><p>Bäckerprozente beziehen sich auf die Gesamtmehlmenge, inklusive Mehl aus Sauerteigen. Beim Sauerteig zählt die gesamte Menge inklusive Wasser.</p><div className="calculation-controls"><label>Berechnung</label><div className="mode-switch"><button className={calculationMode === 'dough' ? 'active' : ''} onClick={() => changeCalculationMode('dough')}>Teigmenge fest</button><button className={calculationMode === 'ingredients' ? 'active' : ''} onClick={() => changeCalculationMode('ingredients')}>Zutatenmengen fest</button></div><label>Teigmenge <NumericInput value={doughWeight} min={1} step={10} disabled={calculationMode === 'ingredients'} onCommit={(value) => setDoughWeight(Math.max(1, value))} ariaLabel="Teigmenge in Gramm" /> <span>g</span></label><button className="pdf-button" onClick={exportPdf}>⇩ PDF exportieren</button></div></div></section>
       <section className="kpi-grid"><Kpi label="Gesamt-TA" value={`${calculations.ta} %`} detail="Mehl + Wasser" accent="orange" /><Kpi label="Versäuertes Mehl" value={`${calculations.sourdough} %`} detail="Anteil an Gesamtmehl" accent="green" /><Kpi label="Gesamtmehlmenge" value={`${calculations.totalFlourGrams} g`} detail="inkl. Sauerteigmehl" accent="purple" /></section>
       <section className="ingredients-section"><div className="section-heading"><div><span className="eyebrow">ZUTATEN</span><h2>Deine Zutaten</h2></div><span className="ingredient-count">{recipe.ingredients.length} Einträge</span></div>
+        <p className="ingredient-lock-hint">Fixiere Zutaten über die Schalter in der Spalte „Fixieren“. Der Mehlausgleich erfolgt über die freien Zutaten.</p>
         {flourPercentageSum !== 100 && <div className="flour-warning" role="alert">
           <strong>Mehlanteile ergeben {flourPercentageSum.toLocaleString('de-DE')} % statt 100 %.</strong>
           <span>Die Anteile aller Mehle und des Mehls aus den Sauerteigen müssen zusammen 100 % ergeben. Bitte prüfe die Zutaten.</span>
         </div>}
-        <div className="ingredient-table"><div className="table-head"><span>Zutat</span><span>Typ / Details</span><span>Bäcker-%</span><span>Gramm</span><span /></div>
-          {sortedIngredients(recipe.ingredients).map((item) => <IngredientRow key={item.id} item={item} grams={fixedIngredientGrams?.[item.id] ?? calculations.ingredientGrams[item.id] ?? 0} calculationMode={calculationMode} onUpdate={updateIngredient} onGramsChange={updateIngredientGrams} onRemove={removeIngredient} />)}
+        <div className="ingredient-table" onFocusCapture={(event) => {
+          if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+            setEditingIngredientOrder(sortedIngredients(recipe.ingredients).map((item) => item.id))
+          }
+        }} onBlurCapture={() => setEditingIngredientOrder(null)}><div className="table-head"><span>Zutat</span><span>Typ / Details</span><span>Bäcker-%</span><span>Gramm</span><span>Fixieren</span><span /></div>
+          {displayedIngredients.map((item) => <IngredientRow key={item.id} item={item} grams={fixedIngredientGrams?.[item.id] ?? calculations.ingredientGrams[item.id] ?? 0} calculationMode={calculationMode} onUpdate={updateIngredient} onGramsChange={updateIngredientGrams} onRemove={removeIngredient} onToggleLock={toggleIngredientLock} lastFreeFlour={freeFlourIds.length === 1 && freeFlourIds[0] === item.id} canRemove={canRemoveRecipeIngredient(recipe, item.id)} />)}
           <div className="add-row"><button onClick={() => addIngredient('flour')}>＋ Mehl</button><button onClick={() => addIngredient('sourdough')}>＋ Sauerteig</button><button onClick={() => addIngredient('liquid')}>＋ Wasser / Flüssigkeit</button><button onClick={() => addIngredient('salt')}>＋ Salz</button><button onClick={() => addIngredient('yeast')}>＋ Hefe</button><button onClick={() => addIngredient('other')}>＋ Sonstige</button></div>
         </div>
       </section>
@@ -210,19 +237,42 @@ function NumericInput({ value, onCommit, disabled = false, min, max, step, ariaL
     const parsed = draft.trim() === '' ? 0 : Number(draft)
     const nextValue = Number.isFinite(parsed) ? parsed : 0
     if (nextValue !== value) onCommit(nextValue)
+    setDraft(String(value))
   }
   const change = (nextDraft: string) => {
     setDraft(nextDraft)
     const parsed = Number(nextDraft)
     if (nextDraft.trim() !== '' && Number.isFinite(parsed) && parsed !== value) onCommit(parsed)
   }
-  return <input ref={inputRef} type="number" min={min} max={max} step={step} value={draft} disabled={disabled} onChange={(event) => change(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} aria-label={ariaLabel} />
+  const blurActiveField = () => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+  }
+  const adjust = (direction: number) => {
+    blurActiveField()
+    // Use native stepping rules without focusing the editable field.
+    const steppingInput = document.createElement('input')
+    steppingInput.type = 'number'
+    if (min !== undefined) steppingInput.min = String(min)
+    if (max !== undefined) steppingInput.max = String(max)
+    steppingInput.step = String(step ?? 1)
+    steppingInput.value = String(value)
+    steppingInput.stepUp(direction)
+    const nextValue = steppingInput.valueAsNumber
+    setDraft(String(value))
+    if (nextValue !== value) onCommit(nextValue)
+  }
+  return <span className="numeric-input-control">
+    <input ref={inputRef} type="number" min={min} max={max} step={step} value={draft} disabled={disabled} onChange={(event) => change(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} aria-label={ariaLabel} />
+    <span className="numeric-step-buttons">
+      {[1, -1].map((direction) => <button key={direction} type="button" disabled={disabled} aria-label={`${ariaLabel ?? 'Wert'} ${direction > 0 ? 'erhöhen' : 'verringern'}`} onPointerDown={(event) => { event.preventDefault(); blurActiveField() }} onClick={() => adjust(direction)}>{direction > 0 ? '▴' : '▾'}</button>)}
+    </span>
+  </span>
 }
 
-function IngredientRow({ item, grams, calculationMode, onUpdate, onGramsChange, onRemove }: { item: Ingredient, grams: number, calculationMode: 'dough' | 'ingredients', onUpdate: (id: string, patch: Partial<Ingredient>) => void, onGramsChange: (id: string, grams: number) => void, onRemove: (id: string) => void }) {
+function IngredientRow({ item, grams, calculationMode, onUpdate, onGramsChange, onRemove, onToggleLock, lastFreeFlour, canRemove }: { item: Ingredient, grams: number, calculationMode: 'dough' | 'ingredients', onUpdate: (id: string, patch: Partial<Ingredient>) => void, onGramsChange: (id: string, grams: number) => void, onRemove: (id: string) => void, onToggleLock: (id: string) => void, lastFreeFlour: boolean, canRemove: boolean }) {
   const setKind = (kind: IngredientKind) => { const patch: Partial<Ingredient> = { kind }; if (kind === 'liquid') Object.assign(patch, { liquidKind: 'water', name: 'Wasser', waterContent: 100 }); if (kind === 'sourdough') Object.assign(patch, { name: 'Rogg en sauerteig'.replace(/ /g, ''), grain: 'Roggen', sourdoughTa: 200 }); if (kind === 'yeast') Object.assign(patch, { name: 'Frischhefe', yeastKind: 'fresh' }); onUpdate(item.id, patch) }
   const switchYeast = (value: YeastKind) => onUpdate(item.id, { yeastKind: value, percentage: convertYeastPercentage(item.percentage, item.yeastKind || 'fresh', value), name: value === 'fresh' ? 'Frischhefe' : 'Trockenhefe' })
-  return <div className={`ingredient-row ${item.kind}`}><div className="ingredient-name"><span className={`ingredient-icon ${item.kind}`}>{item.kind === 'flour' ? '✣' : item.kind === 'sourdough' ? '◒' : item.kind === 'liquid' ? '◌' : item.kind === 'salt' ? '◇' : item.kind === 'yeast' ? '♧' : '✦'}</span>{item.kind === 'other' || (item.kind === 'liquid' && item.liquidKind === 'other') ? <input value={item.name} onChange={(e) => onUpdate(item.id, { name: e.target.value })} /> : <strong>{item.name}</strong>}</div><div className="ingredient-detail"><select value={item.kind} onChange={(e) => setKind(e.target.value as IngredientKind)}><option value="flour">Mehl</option><option value="sourdough">Sauerteig</option><option value="liquid">Wasser / Flüssigkeit</option><option value="salt">Salz</option><option value="yeast">Hefe</option><option value="other">Sonstige</option></select>{item.kind === 'flour' && <select value={item.name} onChange={(e) => onUpdate(item.id, { name: e.target.value })}>{flourTypes.map((type) => <option key={type}>{type}</option>)}</select>}{item.kind === 'sourdough' && <><select value={item.grain} onChange={(e) => onUpdate(item.id, { grain: e.target.value as Grain, name: `${e.target.value}nsauerteig` })}>{grains.map((grain) => <option key={grain}>{grain}</option>)}</select><label>TA <NumericInput value={item.sourdoughTa || 200} onCommit={(value) => onUpdate(item.id, { sourdoughTa: value })} min={100} step={1} ariaLabel="Sauerteig-TA" /></label></>}{item.kind === 'liquid' && <><select value={item.liquidKind} onChange={(e) => { const value = e.target.value as LiquidKind; onUpdate(item.id, { liquidKind: value, name: value === 'water' ? 'Wasser' : value === 'milk' ? 'Milch' : 'Sonstige Flüssigkeit', waterContent: value === 'water' ? 100 : value === 'milk' ? 87 : 0 }) }}>{<><option value="water">Wasser</option><option value="milk">Milch</option><option value="other">Sonstige</option></>}</select>{item.liquidKind === 'other' && <label>Wasseranteil % <NumericInput value={item.waterContent || 0} onCommit={(value) => onUpdate(item.id, { waterContent: value })} min={0} max={100} step={1} ariaLabel="Wasseranteil" /></label>}</>}{item.kind === 'yeast' && <select value={item.yeastKind} onChange={(e) => switchYeast(e.target.value as YeastKind)}><option value="fresh">Frischhefe</option><option value="dry">Trockenhefe</option></select>}{item.kind === 'other' && <label>Wasseranteil % <NumericInput value={item.waterContent || 0} onCommit={(value) => onUpdate(item.id, { waterContent: value })} min={0} max={100} step={1} ariaLabel="Wasseranteil" /></label>}</div><div className="percentage-input"><NumericInput value={round(item.percentage)} onCommit={(value) => onUpdate(item.id, { percentage: value })} disabled={calculationMode === 'ingredients'} min={0} step={0.1} ariaLabel={`${item.name} in Bäckerprozent`} /><span>%</span></div><div className="grams-value"><NumericInput value={grams} onCommit={(value) => onGramsChange(item.id, value)} disabled={calculationMode === 'dough'} min={0} step={1} ariaLabel={`${item.name} in Gramm`} /><span>g</span></div><button className="remove-button" onClick={() => onRemove(item.id)} aria-label={`${item.name} entfernen`}>×</button></div>
+  return <div className={`ingredient-row ${item.kind}${item.locked ? ' locked' : ''}`}><div className="ingredient-name"><span className={`ingredient-icon ${item.kind}`}>{item.kind === 'flour' ? '✣' : item.kind === 'sourdough' ? '◒' : item.kind === 'liquid' ? '◌' : item.kind === 'salt' ? '◇' : item.kind === 'yeast' ? '♧' : '✦'}</span>{item.kind === 'other' || (item.kind === 'liquid' && item.liquidKind === 'other') ? <input disabled={!!item.locked} value={item.name} onChange={(e) => onUpdate(item.id, { name: e.target.value })} /> : <strong>{item.name}</strong>}</div><div className="ingredient-detail"><select disabled={!!item.locked} value={item.kind} onChange={(e) => setKind(e.target.value as IngredientKind)}><option value="flour">Mehl</option><option value="sourdough">Sauerteig</option><option disabled={lastFreeFlour} value="liquid">Wasser / Flüssigkeit</option><option disabled={lastFreeFlour} value="salt">Salz</option><option disabled={lastFreeFlour} value="yeast">Hefe</option><option disabled={lastFreeFlour} value="other">Sonstige</option></select>{item.kind === 'flour' && <select disabled={!!item.locked} value={item.name} onChange={(e) => onUpdate(item.id, { name: e.target.value })}>{flourTypes.map((type) => <option key={type}>{type}</option>)}</select>}{item.kind === 'sourdough' && <><select disabled={!!item.locked} value={item.grain} onChange={(e) => onUpdate(item.id, { grain: e.target.value as Grain, name: `${e.target.value}nsauerteig` })}>{grains.map((grain) => <option key={grain}>{grain}</option>)}</select><label>TA <NumericInput disabled={!!item.locked} value={item.sourdoughTa || 200} onCommit={(value) => onUpdate(item.id, { sourdoughTa: value })} min={100} step={1} ariaLabel="Sauerteig-TA" /></label></>}{item.kind === 'liquid' && <><select disabled={!!item.locked} value={item.liquidKind} onChange={(e) => { const value = e.target.value as LiquidKind; onUpdate(item.id, { liquidKind: value, name: value === 'water' ? 'Wasser' : value === 'milk' ? 'Milch' : 'Sonstige Flüssigkeit', waterContent: value === 'water' ? 100 : value === 'milk' ? 87 : 0 }) }}>{<><option value="water">Wasser</option><option value="milk">Milch</option><option disabled={lastFreeFlour} value="other">Sonstige</option></>}</select>{item.liquidKind === 'other' && <label>Wasseranteil % <NumericInput disabled={!!item.locked} value={item.waterContent || 0} onCommit={(value) => onUpdate(item.id, { waterContent: value })} min={0} max={100} step={1} ariaLabel="Wasseranteil" /></label>}</>}{item.kind === 'yeast' && <select disabled={!!item.locked} value={item.yeastKind} onChange={(e) => switchYeast(e.target.value as YeastKind)}><option value="fresh">Frischhefe</option><option value="dry">Trockenhefe</option></select>}{item.kind === 'other' && <label>Wasseranteil % <NumericInput disabled={!!item.locked} value={item.waterContent || 0} onCommit={(value) => onUpdate(item.id, { waterContent: value })} min={0} max={100} step={1} ariaLabel="Wasseranteil" /></label>}</div><div className="percentage-input"><NumericInput value={round(item.percentage)} onCommit={(value) => onUpdate(item.id, { percentage: value })} disabled={!!item.locked || calculationMode === 'ingredients'} min={0} step={0.1} ariaLabel={`${item.name} in Bäckerprozent`} /><span>%</span></div><div className="grams-value"><NumericInput value={grams} onCommit={(value) => onGramsChange(item.id, value)} disabled={!!item.locked || calculationMode === 'dough'} min={0} step={1} ariaLabel={`${item.name} in Gramm`} /><span>g</span></div><div className="ingredient-fix" data-label="Fixieren"><button type="button" role="switch" aria-checked={!!item.locked} aria-label={`${item.name} fixieren`} className="ingredient-lock" disabled={lastFreeFlour && !item.locked} title={lastFreeFlour && !item.locked ? 'Mindestens eine Mehlzutat muss frei bleiben' : item.locked ? 'Zutat freigeben' : 'Zutat fixieren'} onClick={() => onToggleLock(item.id)}><span className="lock-track" aria-hidden="true"><span /></span><span>{item.locked ? 'Fixiert' : 'Frei'}</span></button></div><button disabled={!canRemove} title={!canRemove ? (item.locked ? 'Zutat zuerst freigeben' : 'Mindestens eine Mehlzutat muss frei bleiben') : undefined} className="remove-button" onClick={() => onRemove(item.id)} aria-label={`${item.name} entfernen`}>×</button></div>
 }
 
 export default App

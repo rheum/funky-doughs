@@ -8,6 +8,7 @@ export type Ingredient = {
   kind: IngredientKind
   name: string
   percentage: number
+  locked?: boolean
   grain?: Grain
   type?: string
   liquidKind?: LiquidKind

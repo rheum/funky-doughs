@@ -18,27 +18,39 @@ export function totalFlourPercentage(recipe: Recipe) {
 }
 
 export function migrateSourdoughPercentages(recipe: Recipe): Recipe {
-  if (recipe.sourdoughPercentageBasis === 'total') return recipe
-  return {
+  const migrated: Recipe = recipe.sourdoughPercentageBasis === 'total' ? recipe : {
     ...recipe,
     sourdoughPercentageBasis: 'total',
     ingredients: recipe.ingredients.map((item) => item.kind === 'sourdough'
       ? { ...item, percentage: precise(item.percentage * ingredientFactor(item)) } : item),
   }
+  const flour = migrated.ingredients.filter(containsFlour)
+  if (!flour.length || flour.some((item) => !item.locked)) return migrated
+  return { ...migrated, ingredients: migrated.ingredients.map((item) => item.id === flour[0].id ? { ...item, locked: false } : item) }
 }
 
-export function updateIngredientPercentage(recipe: Recipe, id: string, percentage: number): Recipe {
+export function setIngredientLocked(recipe: Recipe, id: string, locked: boolean): Recipe {
   const edited = recipe.ingredients.find((item) => item.id === id)
-  if (!edited || !Number.isFinite(percentage)) return recipe
-  if (!containsFlour(edited)) {
-    return { ...recipe, ingredients: recipe.ingredients.map((item) => item.id === id ? { ...item, percentage } : item) }
-  }
+  if (!edited) return recipe
+  if (locked && containsFlour(edited) && !recipe.ingredients.some((item) => item.id !== id && containsFlour(item) && !item.locked)) return recipe
+  return { ...recipe, ingredients: recipe.ingredients.map((item) => item.id === id ? { ...item, locked } : item) }
+}
 
-  const others = recipe.ingredients.filter((item) => item.id !== id && containsFlour(item))
-  // Redistribute flour shares; convert back to whole-starter percentages using each TA.
-  const editedShare = others.length ? Math.max(0, Math.min(100, percentage / ingredientFactor(edited))) : 100
+export function canRemoveRecipeIngredient(recipe: Recipe, id: string) {
+  const edited = recipe.ingredients.find((item) => item.id === id)
+  return !!edited && !edited.locked && (!containsFlour(edited) || recipe.ingredients.some((item) => item.id !== id && containsFlour(item) && !item.locked))
+}
+
+export function rebalanceFreeFlour(recipe: Recipe, editedId?: string): Recipe {
+  const lockedShare = recipe.ingredients.filter((item) => containsFlour(item) && item.locked)
+    .reduce((sum, item) => sum + item.percentage / ingredientFactor(item), 0)
+  const budget = Math.max(0, 100 - lockedShare)
+  const free = recipe.ingredients.filter((item) => containsFlour(item) && !item.locked)
+  const edited = free.find((item) => item.id === editedId)
+  const others = free.filter((item) => item.id !== editedId)
   const shares = new Map(others.map((item) => [item.id, Math.max(0, item.percentage / ingredientFactor(item))]))
-  let remaining = 100 - editedShare - [...shares.values()].reduce((sum, value) => sum + value, 0)
+  const editedShare = edited ? (others.length ? Math.max(0, Math.min(budget, edited.percentage / ingredientFactor(edited))) : budget) : 0
+  let remaining = budget - editedShare - [...shares.values()].reduce((sum, value) => sum + value, 0)
   while (Math.abs(remaining) > 1e-9) {
     const eligible = others.filter((item) => remaining > 0 || shares.get(item.id)! > 1e-9)
     if (!eligible.length) break
@@ -50,33 +62,35 @@ export function updateIngredientPercentage(recipe: Recipe, id: string, percentag
       remaining -= change
     }
   }
-  return {
-    ...recipe,
-    ingredients: recipe.ingredients.map((item) => item.id === id
-      ? { ...item, percentage: precise(editedShare * ingredientFactor(item)) }
-      : shares.has(item.id) ? { ...item, percentage: precise(shares.get(item.id)! * ingredientFactor(item)) } : item),
-  }
+  if (edited) shares.set(edited.id, editedShare)
+  return { ...recipe, ingredients: recipe.ingredients.map((item) => shares.has(item.id)
+    ? { ...item, percentage: precise(shares.get(item.id)! * ingredientFactor(item)) } : item) }
+}
+
+export function updateIngredientPercentage(recipe: Recipe, id: string, percentage: number): Recipe {
+  const edited = recipe.ingredients.find((item) => item.id === id)
+  if (!edited || edited.locked || !Number.isFinite(percentage)) return recipe
+  const updated = { ...recipe, ingredients: recipe.ingredients.map((item) => item.id === id
+    ? { ...item, percentage: Math.max(0, percentage) } : item) }
+  return containsFlour(edited) ? rebalanceFreeFlour(updated, id) : updated
 }
 
 export function updateSourdoughTa(recipe: Recipe, id: string, ta: number, fixedGrams?: Record<string, number>): Recipe {
   const edited = recipe.ingredients.find((item) => item.id === id)
-  if (edited?.kind !== 'sourdough' || !Number.isFinite(ta)) return recipe
+  if (edited?.kind !== 'sourdough' || edited.locked || !Number.isFinite(ta)) return recipe
   const updated = {
     ...recipe,
     ingredients: recipe.ingredients.map((item) => item.id === id ? { ...item, sourdoughTa: Math.max(100, ta) } : item),
   }
-  return fixedGrams
-    ? percentagesFromIngredientGrams(updated, fixedGrams)
-    : updateIngredientPercentage(updated, id, edited.percentage)
+  return fixedGrams ? percentagesFromIngredientGrams(updated, fixedGrams) : rebalanceFreeFlour(updated, id)
 }
 
 export function removeRecipeIngredient(recipe: Recipe, id: string, fixedGrams?: Record<string, number>): Recipe {
-  const removed = recipe.ingredients.find((item) => item.id === id)
-  if (!removed) return recipe
+  if (!canRemoveRecipeIngredient(recipe, id)) return recipe
+  const removed = recipe.ingredients.find((item) => item.id === id)!
   const remaining = { ...recipe, ingredients: recipe.ingredients.filter((item) => item.id !== id) }
   if (fixedGrams) return percentagesFromIngredientGrams(remaining, fixedGrams)
-  const redistributed = containsFlour(removed) ? updateIngredientPercentage(recipe, id, 0) : recipe
-  return { ...redistributed, ingredients: redistributed.ingredients.filter((item) => item.id !== id) }
+  return containsFlour(removed) ? rebalanceFreeFlour(remaining) : remaining
 }
 
 export function calculateRecipe(recipe: Recipe, doughWeight: number): RecipeCalculations {
