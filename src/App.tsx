@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import yaml from 'js-yaml'
-import { jsPDF } from 'jspdf'
-import autoTable from 'jspdf-autotable'
+import { createRecipePdf } from './pdf'
 import { blankRecipe, flourTypes, grains, uid } from './types'
-import type { Grain, Ingredient, IngredientKind, LiquidKind, Recipe, YeastKind } from './types'
+import type { Grain, Ingredient, IngredientKind, LiquidKind, PreparationStep, Recipe, YeastKind } from './types'
 import { deleteRecipe, loadRecipes, saveRecipe } from './db'
 import { calculateRecipe, calculateRecipeFromIngredientGrams, convertYeastPercentage, percentageForIngredientGrams, percentagesFromIngredientGrams } from './calculations'
+import { canReorderPreparationStep, canReorderPreparationStepToEnd, reorderPreparationStep } from './preparation'
 
 const round = (n: number) => Math.round(n * 10) / 10
+const MAX_PREPARATION_DEPTH = 2
 const ingredientGroupOrder: Record<IngredientKind, number> = { flour: 0, sourdough: 1, liquid: 2, salt: 3, yeast: 3, other: 3 }
 const sortedIngredients = (ingredients: Ingredient[]) => [...ingredients].sort((a, b) => ingredientGroupOrder[a.kind] - ingredientGroupOrder[b.kind] || b.percentage - a.percentage)
 
@@ -50,33 +51,8 @@ function App() {
   }
 
   const exportPdf = () => {
-    const doc = new jsPDF({ format: 'a4', unit: 'mm' })
-    const pageWidth = doc.internal.pageSize.getWidth()
-    const accent = '#e87639'
-    const ink = '#29251f'
-    const muted = '#8d8478'
-    const detail = (item: Ingredient) => {
-      if (item.kind === 'sourdough') return `${item.grain} · TA ${item.sourdoughTa || 200}`
-      if (item.kind === 'liquid') return `${item.name}${item.liquidKind === 'other' ? ` · Wasseranteil ${item.waterContent || 0} %` : ''}`
-      return item.name
-    }
     const slug = (recipe.title || 'funky-doughs-rezept').toLowerCase().replace(/[^a-z0-9äöüß]+/gi, '-').replace(/^-|-$/g, '')
-    doc.setTextColor(ink); doc.setFont('helvetica', 'bold'); doc.setFontSize(24); doc.text(recipe.title || 'Funky Doughs-Rezept', 18, 22)
-    doc.setTextColor(muted); doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text(`Teigmenge ${doughWeight} g · Bäckerprozente inklusive Sauerteigmehl`, 18, 29)
-    doc.setDrawColor(accent); doc.setLineWidth(1); doc.line(18, 35, pageWidth - 18, 35)
-    const kpis = [['Gesamt-TA', `${calculations.ta} %`], ['Versäuertes Mehl', `${calculations.sourdough} %`], ['Gesamtmehlmenge', `${calculations.totalFlourGrams} g`]]
-    kpis.forEach(([label, value], index) => { const x = 18 + index * 58; doc.setFillColor('#f7f1e9'); doc.roundedRect(x, 43, 52, 23, 2, 2, 'F'); doc.setTextColor(muted); doc.setFontSize(7); doc.text(label.toUpperCase(), x + 4, 50); doc.setTextColor(ink); doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.text(value, x + 4, 60); doc.setFont('helvetica', 'normal') })
-    autoTable(doc, { startY: 76, margin: { left: 18, right: 18 }, head: [['Zutat', 'Typ / Details', 'Bäcker-%', 'Gramm']], body: sortedIngredients(recipe.ingredients).map((item) => [item.name, detail(item), `${item.percentage} %`, `${calculations.ingredientGrams[item.id] ?? 0} g`]), theme: 'grid', styles: { font: 'helvetica', fontSize: 9, textColor: ink, cellPadding: 3 }, headStyles: { fillColor: '#29251f', textColor: '#ffffff', fontStyle: 'bold' }, alternateRowStyles: { fillColor: '#fbf8f3' }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' } } })
-    const finalY = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || 76
-    const punchMarkY = 148.5
-    doc.setDrawColor('#b8afa3')
-    doc.setLineWidth(0.35)
-    for (let page = 1; page <= doc.getNumberOfPages(); page += 1) {
-      doc.setPage(page)
-      doc.line(4, punchMarkY, 11, punchMarkY)
-    }
-    doc.setPage(doc.getNumberOfPages())
-    doc.setTextColor(muted); doc.setFontSize(8); doc.text('Erstellt mit Funky Doughs', 18, Math.min(finalY + 14, 285))
+    const doc = createRecipePdf(recipe, doughWeight, calculations)
     const filename = `${slug || 'funky-doughs-rezept'}.pdf`
     if (/Android/i.test(navigator.userAgent)) {
       const url = URL.createObjectURL(doc.output('blob'))
@@ -159,6 +135,7 @@ function App() {
           <div className="add-row"><button onClick={() => addIngredient('flour')}>＋ Mehl</button><button onClick={() => addIngredient('sourdough')}>＋ Sauerteig</button><button onClick={() => addIngredient('liquid')}>＋ Wasser / Flüssigkeit</button><button onClick={() => addIngredient('salt')}>＋ Salz</button><button onClick={() => addIngredient('yeast')}>＋ Hefe</button><button onClick={() => addIngredient('other')}>＋ Sonstige</button></div>
         </div>
       </section>
+      <PreparationSection preparation={recipe.preparation || []} onChange={(preparation) => updateRecipe((current) => ({ ...current, preparation }))} />
       <footer className="footer-note"><span>⌘</span> Deine Daten bleiben in diesem Browser. Exportiere regelmäßig eine YAML-Sicherung.</footer>
       {notice && <button className="notice" onClick={() => setNotice('')}>{notice} ×</button>}
       <button className="delete-button" onClick={removeCurrent}>Rezept löschen</button>
@@ -167,6 +144,36 @@ function App() {
 }
 
 function Kpi({ label, value, detail, accent }: { label: string, value: string, detail: string, accent: string }) { return <div className={`kpi-card ${accent}`}><div className="kpi-top"><span>{label}</span><i>↗</i></div><strong>{value}</strong><small>{detail}</small></div> }
+
+function PreparationSection({ preparation, onChange }: { preparation: PreparationStep[], onChange: (preparation: PreparationStep[]) => void }) {
+  const [draggedId, setDraggedId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const draggedIdRef = useRef<string | null>(null)
+  const beginDrag = (id: string) => { draggedIdRef.current = id; setDraggedId(id); setDragOverId(null) }
+  const clearDrag = () => { draggedIdRef.current = null; setDraggedId(null); setDragOverId(null) }
+  const updateAt = (steps: PreparationStep[], id: string, update: (step: PreparationStep) => PreparationStep): PreparationStep[] => steps.map((step) => step.id === id ? update(step) : { ...step, children: updateAt(step.children || [], id, update) })
+  const removeAt = (steps: PreparationStep[], id: string): PreparationStep[] => steps.filter((step) => step.id !== id).map((step) => ({ ...step, children: removeAt(step.children || [], id) }))
+  const addStep = (parentId?: string) => {
+    const next: PreparationStep = { id: uid(), text: '', children: [] }
+    if (!parentId) onChange([...preparation, next])
+    else onChange(updateAt(preparation, parentId, (step) => ({ ...step, children: [...(step.children || []), next] })))
+  }
+  const updateText = (id: string, text: string) => onChange(updateAt(preparation, id, (step) => ({ ...step, text })))
+  const removeStep = (id: string) => onChange(removeAt(preparation, id))
+  const canDropBefore = (targetId: string) => Boolean(draggedId && canReorderPreparationStep(preparation, draggedId, targetId))
+  const moveStep = (sourceId: string, targetId: string) => onChange(reorderPreparationStep(preparation, sourceId, targetId))
+  const moveStepToEnd = (sourceId: string) => onChange(reorderPreparationStep(preparation, sourceId))
+  const renderSteps = (steps: PreparationStep[], prefix: string, depth: number): React.ReactNode => <>{steps.map((step, index) => {
+    const number = prefix ? `${prefix}.${index + 1}` : `${index + 1}`
+    const isDropTarget = Boolean(dragOverId === step.id && canDropBefore(step.id))
+    return <div className={`preparation-node depth-${depth} ${isDropTarget ? 'drop-target' : ''}`} key={step.id} onMouseEnter={() => setDragOverId(canDropBefore(step.id) ? step.id : null)} onMouseUp={() => { const sourceId = draggedIdRef.current ?? draggedId; if (sourceId && canDropBefore(step.id)) moveStep(sourceId, step.id); if (sourceId) clearDrag() }}>
+      <div className="preparation-row" onMouseUp={() => { const sourceId = draggedIdRef.current ?? draggedId; if (sourceId) clearDrag() }}><span className="drag-handle" title="Ziehen zum Verschieben" onMouseDown={(event) => { event.preventDefault(); beginDrag(step.id) }} onMouseUp={clearDrag}>⠿</span><span className="step-number">{depth === 0 ? `${number}.` : number}</span><input value={step.text} placeholder={depth === 0 ? 'Nächsten Zubereitungsschritt eingeben …' : 'Unterschritt eingeben …'} onChange={(event) => updateText(step.id, event.target.value)} aria-label={`Zubereitungsschritt ${number}`} /><button className="remove-button" onClick={() => removeStep(step.id)} aria-label={`Schritt ${number} entfernen`}>×</button></div>
+      <div className="preparation-children">{step.children?.length ? renderSteps(step.children, number, depth + 1) : null}</div>
+      {depth < MAX_PREPARATION_DEPTH && <button className="add-substep" onClick={() => addStep(step.id)}>＋ Unterschritt</button>}
+    </div>
+  })}<div className={`preparation-end-marker ${draggedId && dragOverId === '__end__' + prefix && canReorderPreparationStepToEnd(preparation, draggedId, steps[0].id) ? 'active' : ''}`} onMouseEnter={() => setDragOverId(draggedId && canReorderPreparationStepToEnd(preparation, draggedId, steps[0].id) ? '__end__' + prefix : null)} onMouseUp={() => { const sourceId = draggedIdRef.current ?? draggedId; if (sourceId && canReorderPreparationStepToEnd(preparation, sourceId, steps[0].id)) moveStepToEnd(sourceId); clearDrag() }} /></>
+  return <section className="preparation-section"><div className="section-heading"><div><span className="eyebrow">ABLAUF</span><h2>Zubereitung</h2></div><span className="ingredient-count">{preparation.length} Schritte</span></div><div className="preparation-card">{preparation.length ? <div className="preparation-list">{renderSteps(preparation, '', 0)}</div> : <p className="preparation-empty">Halte hier fest, wie aus deinen Zutaten ein gutes Brot wird.</p>}<button className="add-preparation" onClick={() => addStep()}>＋ Schritt hinzufügen</button></div></section>
+}
 
 function NumericInput({ value, onCommit, disabled = false, min, max, step, ariaLabel }: { value: number, onCommit: (value: number) => void, disabled?: boolean, min?: number, max?: number, step?: number, ariaLabel?: string }) {
   const [draft, setDraft] = useState(String(value))

@@ -96,3 +96,35 @@
 .title-input { display: block; margin-top: 7px; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px 6px; margin-left: -8px; transition: border-color .15s, background .15s; cursor: text; }
 .title-input:hover { border-color: #ded5c9; background: #fffaf3; }
 .title-input:focus { border-color: var(--orange); background: var(--paper); box-shadow: 0 0 0 3px rgba(232,118,57,.1); }
+
+.preparation-section { margin-top: 45px; }
+.preparation-card { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.preparation-list { padding: 8px 19px 12px; }
+.preparation-node { position: relative; border-bottom: 1px solid #eee9e1; padding: 8px 0 7px; }
+.preparation-node.drop-target::before { content: ''; position: absolute; top: -2px; left: 0; right: 0; height: 3px; border-radius: 3px; background: var(--orange); box-shadow: 0 0 0 3px rgba(232,118,57,.12); pointer-events: none; }
+.preparation-node:last-child { border-bottom: 0; }
+.preparation-row { display: grid; grid-template-columns: 20px 34px 1fr 25px; align-items: center; gap: 7px; min-height: 34px; }
+.drag-handle { color: #bdb2a4; cursor: grab; font-size: 18px; line-height: 1; user-select: none; }
+.preparation-node:active .drag-handle { cursor: grabbing; }
+.step-number { color: var(--orange); font: 600 12px 'DM Mono'; align-self: start; padding-top: 7px; }
+.preparation-row input { width: 100%; border: 0; border-bottom: 1px solid #d8d0c5; background: transparent; outline: 0; color: var(--ink); padding: 7px 2px; font: 14px 'DM Sans'; }
+.preparation-row input:focus { border-bottom-color: var(--orange); }
+.preparation-row input::placeholder { color: #b7aea2; }
+.preparation-children { margin-left: 61px; }
+.depth-1 .step-number, .depth-2 .step-number { color: #9d9387; font-size: 11px; }
+.depth-1 .preparation-row input, .depth-2 .preparation-row input { font-size: 13px; }
+.depth-2 { margin-left: 22px; }
+.add-substep { margin: 4px 0 0 61px; border: 0; background: transparent; color: #a39a8e; padding: 3px 0; font-size: 11px; }
+.add-substep:hover, .add-preparation:hover { color: var(--orange); }
+.add-preparation { border: 1px dashed #cfc4b5; border-radius: 5px; background: transparent; color: #81786d; margin: 7px 19px 15px; padding: 8px 11px; font-size: 11px; }
+.preparation-empty { color: #a39a8e; margin: 0; padding: 20px 19px 8px; font-size: 13px; }
+.preparation-end-marker { position: relative; height: 48px; margin-top: -2px; pointer-events: auto; }
+.preparation-end-marker.active::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 3px; background: var(--orange); box-shadow: 0 0 0 3px rgba(232,118,57,.12); pointer-events: none; }
+
+@media (max-width: 620px) {
+  .preparation-list { padding: 7px 14px 11px; }
+  .preparation-row { grid-template-columns: 18px 30px 1fr 22px; gap: 5px; }
+  .preparation-children { margin-left: 42px; }
+  .depth-2 { margin-left: 14px; }
+  .add-substep { margin-left: 42px; }
+}
